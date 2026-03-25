@@ -1,0 +1,30 @@
+#cloud-config
+hostname: ${hostname}
+manage_etc_hosts: true
+users:
+  - name: ubuntu
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - ${ssh_public_key}
+    shell: /bin/bash
+package_update: true
+package_upgrade: true
+packages:
+  - qemu-guest-agent
+  - htop
+  - curl
+  - git
+  - mc
+  - vim
+  - zsh
+  - byobu
+users:
+  - name: test
+    passwd: "$6$Ph8aFOsEWOMFsXWH$a4RNYR6p8QysgojFRSfy45zoctOWzX13F/jmA2dtuPg/A/ThDBbg91SyByr9QvMVDVWUY.6Viz5ICvziTPSGW0"
+    groups: sudo
+    shell: /bin/bash
+    lock_passwd: false
+    sudo: ALL=(ALL) NOPASSWD:ALL
+runcmd:
+  - systemctl start qemu-guest-agent
+  - systemctl enable qemu-guest-agent

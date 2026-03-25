@@ -1,0 +1,24 @@
+---
+- name: Выключить все виртуальные машины из инвентаря
+  hosts: localhost
+  gather_facts: no
+  vars:
+    desired_state: "running"  # или "shutoff" для выключения
+  tasks:
+    - name: Получить список всех хостов из инвентаря
+      set_fact:
+        all_vm_hosts: "{{ groups['all'] }}"
+
+    - name: Выключить каждую ВМ
+      community.libvirt.virt:
+        name: "{{ item }}"
+        state: "{{ desired_state }}"
+        uri: "qemu:///system"   # или qemu:///session, если ВМ созданы в сессии
+      loop: "{{ all_vm_hosts }}"
+      when: item != "localhost"
+      # become: yes  - убрали, т.к. пользователь в группе libvirt
+      register: vm_results
+
+    - name: Показать результаты
+      debug:
+        var: vm_results

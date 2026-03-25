@@ -1,0 +1,135 @@
+terraform {
+  required_providers {
+    libvirt = {
+      source  = "multani/libvirt"
+      version = "0.6.3-1+4"
+    }
+  }
+}
+
+provider "libvirt" {
+  uri = "qemu:///system"
+}
+
+# Переменные
+locals {
+  image_dir      = "/home/tema/my-pools"
+  base_image_name = "ubuntu-2404-base.qcow2"
+  base_image_path = "${local.image_dir}/${local.base_image_name}"
+  image_url      = "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
+
+  vm_name        = "first-vm"
+  vm_volume_name = "${local.vm_name}.qcow2"
+  vm_volume_path = "${local.image_dir}/${local.vm_volume_name}"
+  vm_size_gb     = 25
+}
+
+# Скачивание базового образа, если его нет
+resource "null_resource" "download_base_image" {
+  triggers = {
+    image_url = local.image_url
+    image_path = local.base_image_path
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    command = <<-EOT
+      if [ ! -f ${local.base_image_path} ]; then
+        echo "Скачиваю базовый образ Ubuntu 24.04..."
+        wget -O ${local.base_image_path} ${local.image_url}
+      else
+        echo "Базовый образ уже существует, пропускаем."
+      fi
+    EOT
+  }
+}
+
+# Копирование и расширение тома для VM
+resource "null_resource" "prepare_vm_volume" {
+  depends_on = [null_resource.download_base_image]
+
+  triggers = {
+    base_image = local.base_image_path
+    vm_volume  = local.vm_volume_path
+    size       = local.vm_size_gb
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    command = <<-EOT
+      if [ ! -f ${local.vm_volume_path} ]; then
+        echo "Копирую базовый образ в ${local.vm_volume_path}..."
+        cp ${local.base_image_path} ${local.vm_volume_path}
+        echo "Увеличиваю размер до ${local.vm_size_gb}G..."
+        qemu-img resize ${local.vm_volume_path} ${local.vm_size_gb}G
+      else
+        echo "Том для VM уже существует, пропускаем."
+      fi
+    EOT
+  }
+}
+
+# Регистрируем том в libvirt
+resource "libvirt_volume" "vm_volume" {
+  depends_on = [null_resource.prepare_vm_volume]
+  name       = local.vm_volume_name
+  pool       = "default"
+  source     = local.vm_volume_path
+  format     = "qcow2"
+}
+
+# Cloud‑init
+locals {
+  ssh_public_key = file(pathexpand("~/.ssh/id_ed25519.pub"))
+}
+
+data "template_file" "cloud_init_data" {
+  template = file("${path.module}/cloud_init.cfg")
+  vars = {
+    hostname       = local.vm_name
+    ssh_public_key = local.ssh_public_key
+  }
+}
+
+resource "libvirt_cloudinit_disk" "vm_cloudinit" {
+  name      = "${local.vm_name}-cloudinit.iso"
+  pool      = "default"
+  user_data = data.template_file.cloud_init_data.rendered
+}
+
+resource "libvirt_domain" "ubuntu_vm" {
+  name   = local.vm_name
+  memory = "2048"
+  vcpu   = 2
+
+  # Явно указываем загрузку с диска
+  boot_device {
+    dev = ["hd"]
+  }
+
+  network_interface {
+    network_name = "default"
+  }
+
+  disk {
+    volume_id = libvirt_volume.vm_volume.id
+  }
+
+  cpu = {
+    mode = "host-passthrough"
+  }
+
+  cloudinit = libvirt_cloudinit_disk.vm_cloudinit.id
+
+  console {
+    type        = "pty"
+    target_type = "serial"
+    target_port = "0"
+  }
+
+  graphics {
+    type        = "spice"
+    listen_type = "address"
+    autoport    = true
+  }
+}

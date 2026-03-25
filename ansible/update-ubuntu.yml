@@ -1,0 +1,31 @@
+---
+- name: Обновление Ubuntu и установка дополнительных пакетов
+  hosts: all
+  become: yes
+  vars:
+    extra_packages:
+      - vim
+      - zsh
+      - mc
+      - htop
+      - tmux
+      - byobu
+      - git
+      - curl
+
+
+  tasks:
+    - name: Обновление кэша APT
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Установка дополнительных пакетов
+      ansible.builtin.apt:
+        name: "{{ extra_packages }}"
+        state: present
+
+    - name: Обновление установленных пакетов (upgrade)
+      ansible.builtin.apt:
+        upgrade: safe
+        autoremove: yes

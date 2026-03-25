@@ -1,0 +1,101 @@
+terraform {
+  required_providers {
+    libvirt = {
+      source  = "multani/libvirt"
+      version = "0.6.3-1+4"
+    }
+  }
+}
+
+provider "libvirt" {
+  uri = "qemu:///system"
+}
+
+# Базовый образ (локальный файл)
+resource "libvirt_volume" "ubuntu_volume" {
+  name   = "ubuntu-2404-base.qcow2"
+  pool   = "default"
+  source = "/home/tema/my-pools/ubuntu-24.04-server-cloudimg-amd64.img"
+  format = "qcow2"
+}
+
+# SSH-ключ
+locals {
+  ssh_public_key = file(pathexpand("~/.ssh/id_ed25519.pub"))
+}
+
+# Параметры машин
+locals {
+  vms = {
+    "web" = {
+      memory = 2048
+      vcpu   = 2
+    }
+    "db" = {
+      memory = 4096
+      vcpu   = 4
+    }
+    "app1" = {
+      memory = 2048
+      vcpu   = 2
+    }
+    "app2" = {
+      memory = 2048
+      vcpu   = 2
+    }
+  }
+}
+
+# Тома для каждой ВМ
+resource "libvirt_volume" "vm_volume" {
+  for_each       = local.vms
+  name           = "vm_volume_${each.key}"
+  base_volume_id = libvirt_volume.ubuntu_volume.id
+  pool           = "default"
+  size           = 25 * 1024 * 1024 * 1024
+}
+
+# Cloud-init ISO для каждой ВМ с использованием templatefile
+resource "libvirt_cloudinit_disk" "vm_cloudinit" {
+  for_each = local.vms
+  name     = "cloudinit-${each.key}.iso"
+  pool     = "default"
+  user_data = templatefile("${path.module}/cloud_init.cfg", {
+    hostname       = each.key
+    ssh_public_key = local.ssh_public_key
+  })
+}
+
+# Виртуальные машины
+resource "libvirt_domain" "vm" {
+  for_each = local.vms
+  name     = each.key
+  memory   = each.value.memory
+  vcpu     = each.value.vcpu
+
+  network_interface {
+    network_name = "default"
+  }
+
+  disk {
+    volume_id = libvirt_volume.vm_volume[each.key].id
+  }
+
+  cpu = {
+    mode = "host-passthrough"
+  }
+
+  cloudinit = libvirt_cloudinit_disk.vm_cloudinit[each.key].id
+
+  console {
+    type        = "pty"
+    target_type = "serial"
+    target_port = "0"
+  }
+
+  graphics {
+    type        = "spice"
+    listen_type = "address"
+    autoport    = true
+  }
+}
