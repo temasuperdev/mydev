@@ -11,11 +11,11 @@ terraform {
   }
 }
 
-# Список имён виртуальных машин
-variable "vm_names" {
-  description = "Список имён виртуальных машин"
-  type        = list(string)
-  default     = ["lb-0", "server-0", "server-1", "server-2"]
+# Переменная для имени виртуальной машины
+variable "vm_name" {
+  description = "Имя виртуальной машины"
+  type        = string
+  default     = "firstvm"
 }
 
 provider "libvirt" {
@@ -30,63 +30,50 @@ resource "libvirt_volume" "ubuntu_volume" {
   format = "qcow2"
 }
 
-# SSH-ключ
-locals {
-  ssh_public_key = file(pathexpand("~/.ssh/id_ed25519.pub"))
-  ssh_private_key_path = pathexpand("~/.ssh/id_ed25519")
-}
-
-# Формируем map с именами ВМ и их ролями
-locals {
-  vm_defs = { for name in var.vm_names : name => {
-    name = name
-    role = startswith(name, "lb-") ? "loadbalancer" : "k3s_server"
-  } }
-}
-
-# Тома для каждой ВМ (копии базового образа)
+# Рабочий том для ВМ (копия базового)
 resource "libvirt_volume" "vm_volume" {
-  for_each = local.vm_defs
-
-  name           = "${each.value.name}_volume"
+  name           = "first_vm_volume"
   base_volume_id = libvirt_volume.ubuntu_volume.id
   pool           = "default"
   size           = 25 * 1024 * 1024 * 1024  # 25 ГБ
 }
 
-# Cloud-init диски с настройками хоста
-resource "libvirt_cloudinit_disk" "vm_cloudinit" {
-  for_each = local.vm_defs
+# Локальные значения: SSH-ключи
+locals {
+  ssh_public_key       = file(pathexpand("~/.ssh/id_ed25519.pub"))
+  ssh_private_key_path = pathexpand("~/.ssh/id_ed25519")
+}
 
-  name      = "${each.value.name}_cloudinit.iso"
+# Cloud-init диск с использованием шаблона
+resource "libvirt_cloudinit_disk" "vm_cloudinit" {
+  name      = "${var.vm_name}_cloudinit.iso"
   pool      = "default"
   user_data = templatefile("${path.module}/cloud_init.cfg", {
-    hostname       = each.value.name
+    hostname       = var.vm_name
     ssh_public_key = local.ssh_public_key
   })
 }
 
-# Виртуальные машины
+# Виртуальная машина
 resource "libvirt_domain" "vm" {
-  for_each = local.vm_defs
-
-  name   = each.value.name
+  name   = var.vm_name
   memory = "2048"
   vcpu   = 2
 
   network_interface {
     network_name = "ovs-net"
+    # wait_for_lease = true
   }
 
   disk {
-    volume_id = libvirt_volume.vm_volume[each.key].id
+    volume_id = libvirt_volume.vm_volume.id
   }
 
   cpu = {
     mode = "host-passthrough"
   }
 
-  cloudinit = libvirt_cloudinit_disk.vm_cloudinit[each.key].id
+  cloudinit = libvirt_cloudinit_disk.vm_cloudinit.id
 
   console {
     type        = "pty"
@@ -101,67 +88,20 @@ resource "libvirt_domain" "vm" {
   }
 }
 
-# Получение IP-адресов всех ВМ и формирование Ansible-инвентаря
-resource "null_resource" "get_vm_ips" {
+# Ждём загрузки ВМ и получаем IP через QEMU Guest Agent
+resource "null_resource" "get_vm_ip" {
   depends_on = [libvirt_domain.vm]
 
   provisioner "local-exec" {
     command = <<-EOT
-      # Ждём, пока все ВМ поднимутся и QEMU Guest Agent начнёт отвечать
       sleep 60
-
-      # Очищаем предыдущий инвентарь
-      > ansible_inventory.ini
-
-      # Списки для групп
-      LB_HOSTS=""
-      K3S_HOSTS=""
-
-      for VM_NAME in ${join(" ", keys(local.vm_defs))}; do
-        echo "Получение IP для $VM_NAME..."
-        IP=$(sudo virsh qemu-agent-command "$VM_NAME" '{"execute":"guest-network-get-interfaces"}' 2>/dev/null | jq -r '.return[] | ."ip-addresses"[] | select(."ip-address-type" == "ipv4" and ."ip-address" != "127.0.0.1") | ."ip-address"' | head -n1)
-
-        if [ -z "$IP" ]; then
-          echo "Не удалось получить IP для $VM_NAME" >&2
-          exit 1
-        fi
-
-        # Записываем строку с переменными хоста
-        echo "$VM_NAME ansible_host=$IP ansible_user=test ansible_ssh_private_key_file=${local.ssh_private_key_path}" >> ansible_inventory.ini
-
-        # Добавляем хост в соответствующую группу (POSIX‑совместимо)
-        case "$VM_NAME" in
-          lb-*)
-            LB_HOSTS="$LB_HOSTS $VM_NAME"
-            ;;
-          *)
-            K3S_HOSTS="$K3S_HOSTS $VM_NAME"
-            ;;
-        esac
-      done
-
-      # Добавляем разделитель перед группами
-      echo "" >> ansible_inventory.ini
-
-      # Группа loadbalancer
-      if [ -n "$LB_HOSTS" ]; then
-        echo "[loadbalancer]" >> ansible_inventory.ini
-        for host in $LB_HOSTS; do
-          echo "$host" >> ansible_inventory.ini
-        done
-        echo "" >> ansible_inventory.ini
-      fi
-
-      # Группа k3s_servers
-      if [ -n "$K3S_HOSTS" ]; then
-        echo "[k3s_servers]" >> ansible_inventory.ini
-        for host in $K3S_HOSTS; do
-          echo "$host" >> ansible_inventory.ini
-        done
-        echo "" >> ansible_inventory.ini
-      fi
-
-      echo "Инвентарь сформирован в ansible_inventory.ini"
+      VM_NAME="${libvirt_domain.vm.name}"
+      # Получаем IP через qemu-agent, исключая loopback
+      IP=$(sudo virsh qemu-agent-command "$VM_NAME" '{"execute":"guest-network-get-interfaces"}' | jq -r '.return[] | ."ip-addresses"[] | select(."ip-address-type" == "ipv4" and ."ip-address" != "127.0.0.1") | ."ip-address"')
+      FIRST_IP=$(echo "$IP" | head -n1)
+      # Записываем инвентарь Ansible в формате INI с переменными хоста
+      echo "$VM_NAME ansible_host=$FIRST_IP ansible_user=test ansible_ssh_private_key_file=${local.ssh_private_key_path}" > ansible_inventory.ini
+      echo "$VM_NAME IP = $FIRST_IP"
     EOT
   }
 }
