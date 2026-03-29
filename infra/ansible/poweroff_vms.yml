@@ -3,7 +3,7 @@
   hosts: localhost
   gather_facts: no
   vars:
-    desired_state: "running"  # или "shutoff" для выключения
+    desired_state: "shutdown"  # или "shutdown" для выключения
   tasks:
     - name: Получить список всех хостов из инвентаря
       set_fact:
