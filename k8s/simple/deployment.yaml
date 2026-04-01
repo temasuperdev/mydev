@@ -3,6 +3,8 @@ kind: Deployment
 metadata:
   name: simple-app
   namespace: default
+  labels:
+    app: simple-app
 spec:
   replicas: 2
   selector:
@@ -13,14 +15,34 @@ spec:
       labels:
         app: simple-app
     spec:
+      # Если реестр Harbour приватный – оставляем. Если публичный – можно удалить.
       imagePullSecrets:
       - name: harbor-creds
       containers:
       - name: app
-        image: harbor.mydev.me/library/simple-app:latest   # если образ в library
-        # image: harbor.mydev.me/myproject/simple-app:latest   # если myproject существует
+        image: harbor.mydev.me/library/simple-app:latest   # замените на ваш образ
+        imagePullPolicy: Always
         ports:
         - containerPort: 8000
+          name: http
+        env:
+        # Downward API — передаём метаданные в контейнер
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
         readinessProbe:
           httpGet:
             path: /health
