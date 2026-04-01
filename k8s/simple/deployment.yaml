@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simple-app
+  namespace: default
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: simple-app
+  template:
+    metadata:
+      labels:
+        app: simple-app
+    spec:
+      imagePullSecrets:
+      - name: harbor-creds
+      containers:
+      - name: app
+        image: harbor.mydev.me/library/simple-app:latest   # если образ в library
+        # image: harbor.mydev.me/myproject/simple-app:latest   # если myproject существует
+        ports:
+        - containerPort: 8000
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 15
+          periodSeconds: 20

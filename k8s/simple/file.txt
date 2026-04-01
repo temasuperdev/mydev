@@ -1,0 +1,4 @@
+kubectl create secret docker-registry harbor-creds \
+  --docker-server=harbor.mydev.me \
+  --docker-username=admin \
+  --docker-password=Harbor12345
