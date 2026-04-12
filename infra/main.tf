@@ -49,7 +49,7 @@ resource "libvirt_volume" "vm_volume2" {
   name           = "second_vm_volume"
   base_volume_id = libvirt_volume.ubuntu_volume.id
   pool           = "default"
-  size           = 25 * 1024 * 1024 * 1024  # 25 ГБ
+  size           = 45 * 1024 * 1024 * 1024  # 45 ГБ
 }
 
 # Локальные значения: SSH-ключи
@@ -78,11 +78,12 @@ resource "libvirt_cloudinit_disk" "vm_cloudinit2" {
   })
 }
 
-# Первая виртуальная машина
+# Первая виртуальная машина (выключена, 4 vCPU, 4 ГБ RAM)
 resource "libvirt_domain" "vm" {
-  name   = var.vm_name
-  memory = "2048"
-  vcpu   = 2
+  name    = var.vm_name
+  memory  = "4096"   # 4 ГБ
+  vcpu    = 4        # 4 ядра
+  running = false    # ВМ будет выключена после применения
 
   network_interface {
     network_name = "ovs-net"
@@ -111,11 +112,11 @@ resource "libvirt_domain" "vm" {
   }
 }
 
-# Вторая виртуальная машина
+# Вторая виртуальная машина (включена, 8 vCPU, 10 ГБ RAM)
 resource "libvirt_domain" "vm2" {
   name   = var.vm_name2
-  memory = "2048"
-  vcpu   = 2
+  memory = "10240"
+  vcpu   = 8
 
   network_interface {
     network_name = "ovs-net"
@@ -145,6 +146,7 @@ resource "libvirt_domain" "vm2" {
 }
 
 # Получение IP первой ВМ и создание инвентаря Ansible (перезапись файла)
+# Для выключенной ВМ скрипт не найдёт IP, но это не вызовет ошибки apply
 resource "null_resource" "get_vm_ip" {
   depends_on = [libvirt_domain.vm]
 
