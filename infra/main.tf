@@ -11,18 +11,24 @@ terraform {
   }
 }
 
-# Переменная для имени виртуальной машины
+# Переменные для имён виртуальных машин
 variable "vm_name" {
-  description = "Имя виртуальной машины"
+  description = "Имя первой виртуальной машины"
   type        = string
   default     = "firstvm"
+}
+
+variable "vm_name2" {
+  description = "Имя второй виртуальной машины"
+  type        = string
+  default     = "secondvm"
 }
 
 provider "libvirt" {
   uri = "qemu:///system"
 }
 
-# Базовый образ из локальной папки
+# Базовый образ из локальной папки (общий для обеих ВМ)
 resource "libvirt_volume" "ubuntu_volume" {
   name   = "ubuntu-2404-base.qcow2"
   pool   = "default"
@@ -30,9 +36,17 @@ resource "libvirt_volume" "ubuntu_volume" {
   format = "qcow2"
 }
 
-# Рабочий том для ВМ (копия базового)
+# Рабочий том для первой ВМ
 resource "libvirt_volume" "vm_volume" {
   name           = "first_vm_volume"
+  base_volume_id = libvirt_volume.ubuntu_volume.id
+  pool           = "default"
+  size           = 25 * 1024 * 1024 * 1024  # 25 ГБ
+}
+
+# Рабочий том для второй ВМ
+resource "libvirt_volume" "vm_volume2" {
+  name           = "second_vm_volume"
   base_volume_id = libvirt_volume.ubuntu_volume.id
   pool           = "default"
   size           = 25 * 1024 * 1024 * 1024  # 25 ГБ
@@ -44,7 +58,7 @@ locals {
   ssh_private_key_path = pathexpand("~/.ssh/id_ed25519")
 }
 
-# Cloud-init диск с использованием шаблона
+# Cloud-init диск для первой ВМ
 resource "libvirt_cloudinit_disk" "vm_cloudinit" {
   name      = "${var.vm_name}_cloudinit.iso"
   pool      = "default"
@@ -54,7 +68,17 @@ resource "libvirt_cloudinit_disk" "vm_cloudinit" {
   })
 }
 
-# Виртуальная машина
+# Cloud-init диск для второй ВМ
+resource "libvirt_cloudinit_disk" "vm_cloudinit2" {
+  name      = "${var.vm_name2}_cloudinit.iso"
+  pool      = "default"
+  user_data = templatefile("${path.module}/cloud_init.cfg", {
+    hostname       = var.vm_name2
+    ssh_public_key = local.ssh_public_key
+  })
+}
+
+# Первая виртуальная машина
 resource "libvirt_domain" "vm" {
   name   = var.vm_name
   memory = "2048"
@@ -62,7 +86,6 @@ resource "libvirt_domain" "vm" {
 
   network_interface {
     network_name = "ovs-net"
-    # wait_for_lease = true
   }
 
   disk {
@@ -88,7 +111,40 @@ resource "libvirt_domain" "vm" {
   }
 }
 
-# Ждём загрузки ВМ и получаем IP через QEMU Guest Agent
+# Вторая виртуальная машина
+resource "libvirt_domain" "vm2" {
+  name   = var.vm_name2
+  memory = "2048"
+  vcpu   = 2
+
+  network_interface {
+    network_name = "ovs-net"
+  }
+
+  disk {
+    volume_id = libvirt_volume.vm_volume2.id
+  }
+
+  cpu = {
+    mode = "host-passthrough"
+  }
+
+  cloudinit = libvirt_cloudinit_disk.vm_cloudinit2.id
+
+  console {
+    type        = "pty"
+    target_type = "serial"
+    target_port = "0"
+  }
+
+  graphics {
+    type        = "spice"
+    listen_type = "address"
+    autoport    = true
+  }
+}
+
+# Получение IP первой ВМ и создание инвентаря Ansible (перезапись файла)
 resource "null_resource" "get_vm_ip" {
   depends_on = [libvirt_domain.vm]
 
@@ -96,12 +152,24 @@ resource "null_resource" "get_vm_ip" {
     command = <<-EOT
       sleep 60
       VM_NAME="${libvirt_domain.vm.name}"
-      # Получаем IP через qemu-agent, исключая loopback
-      IP=$(sudo virsh qemu-agent-command "$VM_NAME" '{"execute":"guest-network-get-interfaces"}' | jq -r '.return[] | ."ip-addresses"[] | select(."ip-address-type" == "ipv4" and ."ip-address" != "127.0.0.1") | ."ip-address"')
-      FIRST_IP=$(echo "$IP" | head -n1)
-      # Записываем инвентарь Ansible в формате INI с переменными хоста
-      echo "$VM_NAME ansible_host=$FIRST_IP ansible_user=test ansible_ssh_private_key_file=${local.ssh_private_key_path}" > ansible_inventory.ini
-      echo "$VM_NAME IP = $FIRST_IP"
+      IP=$(sudo virsh qemu-agent-command "$VM_NAME" '{"execute":"guest-network-get-interfaces"}' | jq -r '.return[] | ."ip-addresses"[] | select(."ip-address-type" == "ipv4" and ."ip-address" != "127.0.0.1") | ."ip-address"' | head -n1)
+      echo "$VM_NAME ansible_host=$IP ansible_user=test ansible_ssh_private_key_file=${local.ssh_private_key_path}" > ansible_inventory.ini
+      echo "$VM_NAME IP = $IP"
+    EOT
+  }
+}
+
+# Получение IP второй ВМ и дописывание строки в инвентарь Ansible
+resource "null_resource" "get_vm_ip2" {
+  depends_on = [libvirt_domain.vm2]
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      sleep 60
+      VM_NAME="${libvirt_domain.vm2.name}"
+      IP=$(sudo virsh qemu-agent-command "$VM_NAME" '{"execute":"guest-network-get-interfaces"}' | jq -r '.return[] | ."ip-addresses"[] | select(."ip-address-type" == "ipv4" and ."ip-address" != "127.0.0.1") | ."ip-address"' | head -n1)
+      echo "$VM_NAME ansible_host=$IP ansible_user=test ansible_ssh_private_key_file=${local.ssh_private_key_path}" >> ansible_inventory.ini
+      echo "$VM_NAME IP = $IP"
     EOT
   }
 }
